@@ -1,4 +1,4 @@
-# ========== 奖励领取及导出配置 ==========
+# ========== 奖励领取开关及导出配置 ==========
 export:
   enabled: false
   data-file: "island_data.yml"
