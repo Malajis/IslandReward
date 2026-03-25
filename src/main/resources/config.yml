@@ -27,6 +27,8 @@ rewards:
       - ""
       - "§7感谢你参与 {previous_week} 的冒险！"
       - "§7祝你在 {current_week} 再创佳绩！"
+      - ""
+      - "§e纪念品"
 
   level-rewards:
     10000:
@@ -68,10 +70,6 @@ rewards:
 
   completion:
     items:
-      - material: BEACON
-        amount: 1
-      - material: NETHER_STAR
-        amount: 1
       - material: DRAGON_EGG
         amount: 1
     commands:
@@ -202,8 +200,8 @@ messages:
   help-check: "§e/ir check <玩家> §7- 查看玩家通关次数"
   help-add: "§e/ir add <玩家> <次数> §7- 增加玩家通关次数"
   help-reimport: "§e/ir reimport §7- 重新导入{previous_week}数据"
-  help-clear: "§e/ir clear §7- 清除领取记录"
-  help-clearcompletion: "§e/ir clearcompletion §7- 清除通关记录"
+  help-clear: "§e/ir clear <玩家|all>§7- 清除领取记录"
+  help-clearcompletion: "§e/ir clearcompletion <玩家|all>§7- 清除通关记录"
   help-help: "§e/ir help §7- 查看帮助"
   help-footer: "§6§l============================"
   help-permission-note: "§7注: 管理员命令需要 islandreward.admin 权限"
