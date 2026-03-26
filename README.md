@@ -64,16 +64,6 @@ IslandReward 是一款 Minecraft 服务器插件，为基于 BentoBox 的岛屿�
 | `%islandreward_current_week%` | 当前周目名称 | 第二周目 |
 | `%islandreward_export_enabled%` | 奖励领取开关 | true |
 
-### 使用示例
-
-在计分板或公告中显示：
-
-| 代码 | 说明 |
-|------|------|
-| `§7前周目等级: §a%islandreward_previous_level%` | 显示前周目等级 |
-| `§7通关状态: %islandreward_completed_status%` | 显示通关状态（已通关/未通关） |
-| `§7累计通关: §e%islandreward_completion% §7次` | 显示累计通关次数 |
-
 ## ⚙️ 配置说明
 
 配置文件位于 `plugins/IslandReward/config.yml`
@@ -123,29 +113,6 @@ amount: 1
 commands:
 - "broadcast §6恭喜 {player} 通关次数 +1"
 ```
-
-### 奖励变量说明
-
-在奖励命令中可使用以下变量：
-
-| 变量 | 说明 |
-|------|------|
-| `{player}` | 玩家名 |
-| `{level}` | 前周目等级 |
-| `{completions}` | 本次增加的通关次数 |
-| `{previous_week}` | 前周目名称 |
-| `{current_week}` | 当前周目名称 |
-
-## 📂 数据文件
-
-插件会在 `plugins/IslandReward/` 目录下生成以下文件：
-
-| 文件 | 说明 |
-|------|------|
-| `config.yml` | 主配置文件 |
-| `island_data.yml` | 导出的玩家等级数据（名称可自定义） |
-| `completion_data.yml` | 玩家累计通关次数 |
-| `claimed_this_week.yml` | 已领取奖励的玩家列表 |
 
 ## 📝 使用流程
 
@@ -202,12 +169,3 @@ A: 目前支持 BentoBox 系列的岛屿插件（BSkyBlock、ASkyBlock 等）。
 | 权限节点 | 描述 | 默认 |
 |----------|------|------|
 | `islandreward.admin` | 允许使用所有管理员命令 | op |
-
-## 📄 许可证
-
-当前仓库未声明开源许可证，使用前请先联系作者获取授权。
-
-## 🙏 致谢
-
-- 感谢 BentoBox 团队提供的 API
-- 感谢 PlaceholderAPI 团队提供的变量扩展支持
