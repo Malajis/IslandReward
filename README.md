@@ -2,7 +2,7 @@
 
 IslandReward 是一款 Minecraft 服务器插件，为基于 BentoBox 的岛屿系统提供**周目奖励**和**通关次数统计**功能。玩家可根据上一周目的岛屿等级领取奖励，达到通关阈值还可获得额外奖励和纪念品。
 
-## ✨ 功能特性
+## 功能特性
 
 - **周目奖励系统**：玩家领取上一周目的等级奖励
 - **通关阈值机制**：达到指定等级可增加通关次数
@@ -13,7 +13,7 @@ IslandReward 是一款 Minecraft 服务器插件，为基于 BentoBox 的岛屿�
 - **数据持久化**：自动保存通关次数和领取记录
 - **全消息可配置**：支持自定义所有提示消息
 
-## 📦 安装方法
+## 安装方法
 
 1. 将 `IslandReward.jar` 放入服务器的 `plugins/` 目录
 2. 确保服务器已安装 **PlaceholderAPI**（可选，用于变量）
@@ -22,7 +22,7 @@ IslandReward 是一款 Minecraft 服务器插件，为基于 BentoBox 的岛屿�
 5. 编辑 `plugins/IslandReward/config.yml` 进行配置
 6. 使用 `/ir export` 导出上一周目的岛屿等级数据
 
-## 🛠️ 命令
+## 命令
 
 ### 玩家命令
 
@@ -47,7 +47,7 @@ IslandReward 是一款 Minecraft 服务器插件，为基于 BentoBox 的岛屿�
 
 **快捷别名**：`/ir` 和 `/islandreward` 均可使用
 
-## 🔌 PlaceholderAPI 变量
+## PlaceholderAPI 变量
 
 本插件支持 PlaceholderAPI，你可以在其他插件中使用以下变量：
 
@@ -64,7 +64,7 @@ IslandReward 是一款 Minecraft 服务器插件，为基于 BentoBox 的岛屿�
 | `%islandreward_current_week%` | 当前周目名称 | 第二周目 |
 | `%islandreward_export_enabled%` | 奖励领取开关 | true |
 
-## ⚙️ 配置说明
+## 配置说明
 
 配置文件位于 `plugins/IslandReward/config.yml`
 
@@ -114,7 +114,7 @@ commands:
 - "broadcast §6恭喜 {player} 通关次数 +1"
 ```
 
-## 📝 使用流程
+## 使用流程
 
 ### 周目更替时的操作流程
 
@@ -144,7 +144,7 @@ commands:
 level: 等级
 ```
 
-## ❓ 常见问题
+## 常见问题
 
 **Q: 如何开始使用？**  
 A: 配置好 `config.yml` 后，执行 `/ir export` 导出数据，然后玩家即可用 `/ir claim` 领取奖励。
