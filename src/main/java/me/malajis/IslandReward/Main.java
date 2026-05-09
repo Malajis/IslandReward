@@ -4,15 +4,20 @@ import com.google.gson.Gson;
 import com.google.gson.JsonObject;
 import org.bukkit.Bukkit;
 import org.bukkit.Material;
+import org.bukkit.NamespacedKey;
 import org.bukkit.command.CommandSender;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
+import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
+import org.bukkit.inventory.Inventory;
+import org.bukkit.inventory.InventoryHolder;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
+import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.plugin.java.JavaPlugin;
 
 import java.io.File;
@@ -30,8 +35,15 @@ public class Main extends JavaPlugin implements Listener {
     // 奖励系统数据
     // ============================================================
     private Map<String, Integer> playerCompletionCount = new HashMap<>();   // 玩家累计通关次数
-    private Map<String, Integer> previousData = new HashMap<>();            // 前周目等级数据
+    private Map<String, Integer> previousData = new HashMap<>();            // 当前配置的前周目等级数据
     private Set<String> claimedThisWeek = new HashSet<>();                  // 已领取奖励的玩家
+
+    // ============================================================
+    // 多周目数据
+    // ============================================================
+    private Map<Integer, Map<String, Integer>> allWeekData = new HashMap<>(); // 周目编号 -> 玩家等级数据
+    private List<Integer> detectedWeeks = new ArrayList<>();                  // 检测到的所有周目编号
+    private int previousWeekIndex = 1;                                        // 当前读取的上个周目文件编号
 
     // ============================================================
     // 导出系统
@@ -69,6 +81,7 @@ public class Main extends JavaPlugin implements Listener {
     public void onEnable() {
         getDataFolder().mkdirs();
         saveDefaultConfig();
+        updateConfig();
         loadConfig();
         loadMessages();
 
@@ -81,7 +94,6 @@ public class Main extends JavaPlugin implements Listener {
         // 注册 PlaceholderAPI 扩展
         if (Bukkit.getPluginManager().getPlugin("PlaceholderAPI") != null) {
             new IslandRewardExpansion(this).register();
-            getLogger().info("已注册 PlaceholderAPI 扩展");
         }
 
         // 注册命令
@@ -96,7 +108,8 @@ public class Main extends JavaPlugin implements Listener {
 
         getLogger().info("=== IslandReward 插件已启用 ===");
         getLogger().info("已加载 " + playerCompletionCount.size() + " 名玩家的通关次数数据");
-        getLogger().info("已加载 " + previousData.size() + " 条" + previousWeek + "数据");
+        getLogger().info("检测到 " + detectedWeeks.size() + " 个周目数据: " + detectedWeeks);
+        getLogger().info("当前前周目数据编号: " + previousWeekIndex + "，共 " + previousData.size() + " 条");
         getLogger().info("已领取玩家: " + claimedThisWeek.size() + " 人");
         getLogger().info("通关阈值: " + completionThreshold + " 级");
         getLogger().info("当前周目: " + currentWeek);
@@ -114,6 +127,57 @@ public class Main extends JavaPlugin implements Listener {
     // 配置加载
     // ============================================================
 
+    private void updateConfig() {
+        File configFile = new File(getDataFolder(), "config.yml");
+        if (!configFile.exists()) return;
+
+        YamlConfiguration currentConfig = YamlConfiguration.loadConfiguration(configFile);
+        YamlConfiguration defaultConfig = new YamlConfiguration();
+
+        try {
+            java.io.InputStream defaultStream = getResource("config.yml");
+            if (defaultStream == null) return;
+            defaultConfig.load(new java.io.InputStreamReader(defaultStream));
+        } catch (Exception e) {
+            getLogger().warning("无法读取默认配置: " + e.getMessage());
+            return;
+        }
+
+        List<String> addedKeys = new ArrayList<>();
+        mergeMissingKeys(defaultConfig, currentConfig, "", addedKeys);
+
+        if (!addedKeys.isEmpty()) {
+            try {
+                currentConfig.save(configFile);
+                getLogger().info("已自动补全 " + addedKeys.size() + " 个缺失的配置项: " + addedKeys);
+            } catch (Exception e) {
+                getLogger().warning("保存补全后的配置失败: " + e.getMessage());
+            }
+        }
+    }
+
+    private void mergeMissingKeys(ConfigurationSection defaultSection, ConfigurationSection targetSection, String parentPath, List<String> addedKeys) {
+        for (String key : defaultSection.getKeys(false)) {
+            String fullKey = parentPath.isEmpty() ? key : parentPath + "." + key;
+
+            if (defaultSection.isConfigurationSection(key)) {
+                ConfigurationSection subDefault = defaultSection.getConfigurationSection(key);
+                if (!targetSection.isConfigurationSection(key)) {
+                    targetSection.createSection(key);
+                    addedKeys.add(fullKey + " (新增节点)");
+                }
+                ConfigurationSection subTarget = targetSection.getConfigurationSection(key);
+                mergeMissingKeys(subDefault, subTarget, fullKey, addedKeys);
+            } else {
+                if (!targetSection.contains(key)) {
+                    Object defaultValue = defaultSection.get(key);
+                    targetSection.set(key, defaultValue);
+                    addedKeys.add(fullKey);
+                }
+            }
+        }
+    }
+
     private void loadConfig() {
         reloadConfig();
 
@@ -125,6 +189,7 @@ public class Main extends JavaPlugin implements Listener {
         completionThreshold = getConfig().getInt("completion-threshold", 10000);
         currentWeek = getConfig().getString("current-week", "第二周目");
         previousWeek = getConfig().getString("previous-week", "第一周目");
+        previousWeekIndex = getConfig().getInt("previous-week-data", 1);
         timeFormat = getConfig().getString("time-format", "yyyy-MM-dd HH:mm:ss");
 
         // 等级奖励物品
@@ -233,19 +298,47 @@ public class Main extends JavaPlugin implements Listener {
     }
 
     private void loadPreviousData() {
-        File file = new File(getDataFolder(), exportDataFile);
-        if (!file.exists()) {
-            getLogger().warning("未找到" + previousWeek + "数据文件 " + exportDataFile + "！");
+        allWeekData.clear();
+        detectedWeeks.clear();
+        previousData.clear();
+
+        File dataFolder = getDataFolder();
+        File[] dataFiles = dataFolder.listFiles((dir, name) -> name.startsWith("island_data_") && name.endsWith(".yml"));
+
+        if (dataFiles == null || dataFiles.length == 0) {
+            getLogger().warning("未找到任何 island_data_*.yml 周目数据文件！");
             return;
         }
 
-        YamlConfiguration config = YamlConfiguration.loadConfiguration(file);
-        for (String playerName : config.getKeys(false)) {
-            int level = config.getInt(playerName + ".level");
-            previousData.put(playerName, level);
+        for (File file : dataFiles) {
+            String fileName = file.getName();
+            String numStr = fileName.replace("island_data_", "").replace(".yml", "");
+
+            try {
+                int weekNum = Integer.parseInt(numStr);
+                YamlConfiguration config = YamlConfiguration.loadConfiguration(file);
+                Map<String, Integer> weekData = new HashMap<>();
+
+                for (String playerName : config.getKeys(false)) {
+                    int level = config.getInt(playerName + ".level");
+                    weekData.put(playerName, level);
+                }
+
+                allWeekData.put(weekNum, weekData);
+                detectedWeeks.add(weekNum);
+                getLogger().info("从 " + fileName + " 加载了 " + weekData.size() + " 条数据（第" + weekNum + "周目）");
+            } catch (NumberFormatException e) {
+                getLogger().warning("无法解析周目编号: " + fileName + "，已跳过");
+            }
         }
 
-        getLogger().info("从 " + exportDataFile + " 加载了 " + previousData.size() + " 条" + previousWeek + "数据");
+        Collections.sort(detectedWeeks);
+
+        if (allWeekData.containsKey(previousWeekIndex)) {
+            previousData = allWeekData.get(previousWeekIndex);
+        } else {
+            getLogger().warning("未找到第" + previousWeekIndex + "周目数据文件 island_data_" + previousWeekIndex + ".yml！");
+        }
     }
 
     private void loadClaimedData() {
@@ -488,15 +581,6 @@ public class Main extends JavaPlugin implements Listener {
                 }
             }, 40L);
         }
-
-        int completionCount = playerCompletionCount.getOrDefault(playerName, 0);
-        if (completionCount > 0) {
-            Bukkit.getScheduler().runTaskLater(this, () -> {
-                if (player.isOnline()) {
-                    player.sendMessage(getMessage("completion-display").replace("{count}", String.valueOf(completionCount)));
-                }
-            }, 60L);
-        }
     }
 
     private void sendReminder(Player player, int oldLevel) {
@@ -517,19 +601,19 @@ public class Main extends JavaPlugin implements Listener {
 
     private void claimReward(Player player) {
         if (!exportEnabled) {
-            player.sendMessage(getMessage("reward-disabled"));  // 单独提示，有前缀
+            player.sendMessage(getMessage("reward-disabled"));
             return;
         }
 
         String playerName = player.getName();
 
         if (claimedThisWeek.contains(playerName)) {
-            player.sendMessage(getMessage("already-claimed").replace("{previous_week}", previousWeek));  // 单独提示，有前缀
+            player.sendMessage(getMessage("already-claimed").replace("{previous_week}", previousWeek));
             return;
         }
 
         if (!previousData.containsKey(playerName)) {
-            player.sendMessage(getMessage("no-data").replace("{previous_week}", previousWeek));  // 单独提示，有前缀
+            player.sendMessage(getMessage("no-data").replace("{previous_week}", previousWeek));
             return;
         }
 
@@ -545,9 +629,7 @@ public class Main extends JavaPlugin implements Listener {
         claimedThisWeek.add(playerName);
         saveClaimedData();
 
-        // 框框 - 无前缀
         player.sendMessage(getRawMessage("reward-header"));
-        // 框框内的内容 - 无前缀
         player.sendMessage(getRawMessage("reward-success")
                 .replace("{previous_week}", previousWeek)
                 .replace("{level}", String.valueOf(oldLevel)));
@@ -558,48 +640,160 @@ public class Main extends JavaPlugin implements Listener {
         } else {
             player.sendMessage(getRawMessage("reward-not-completed").replace("{threshold}", String.valueOf(completionThreshold)));
         }
-        // 框框 - 无前缀
         player.sendMessage(getRawMessage("reward-footer"));
 
         player.playSound(player.getLocation(), org.bukkit.Sound.ENTITY_PLAYER_LEVELUP, 1.0f, 1.0f);
     }
 
-    private void showInfo(Player player) {
-        String playerName = player.getName();
+    private void showInfo(Player viewer) {
+        buildAndOpenInfoGui(viewer, viewer.getName(), false);
+    }
 
-        if (!previousData.containsKey(playerName)) {
-            player.sendMessage(getMessage("no-data").replace("{previous_week}", previousWeek));
+    private void showInfo(CommandSender sender, String targetName) {
+        if (!(sender instanceof Player)) {
+            sender.sendMessage(getMessage("player-only"));
             return;
         }
+        buildAndOpenInfoGui((Player) sender, targetName, true);
+    }
 
-        int oldLevel = previousData.get(playerName);
-        boolean completed = oldLevel >= completionThreshold;
-        boolean claimed = claimedThisWeek.contains(playerName);
+    private void buildAndOpenInfoGui(Player viewer, String targetName, boolean viewOnly) {
+        int completionCount = playerCompletionCount.getOrDefault(targetName, 0);
+        NamespacedKey weekKey = new NamespacedKey(this, "week_num");
 
-        player.sendMessage(getRawMessage("info-header").replace("{previous_week}", previousWeek));
-        player.sendMessage(getRawMessage("info-level")
-                .replace("{previous_week}", previousWeek)
-                .replace("{level}", String.valueOf(oldLevel)));
-        player.sendMessage(getRawMessage("info-completed") +
-                (completed ? getRawMessage("info-completed-yes").replace("{threshold}", String.valueOf(completionThreshold))
-                        : getRawMessage("info-completed-no")));
-        player.sendMessage(getRawMessage("info-completion-gain") +
-                (completed ? getRawMessage("info-gain-yes") : getRawMessage("info-gain-no")));
-        player.sendMessage(getRawMessage("info-claim-status") +
-                (claimed ? getRawMessage("info-claimed-yes") : getRawMessage("info-claimed-no")));
-        player.sendMessage(getRawMessage("info-footer"));
+        String guiTitle = viewOnly ? "§8§l" + targetName + " 的周目数据" : getRawMessage("gui-title");
+        int size = 54;
+        Inventory inv = Bukkit.createInventory(new InfoGuiHolder(), size, guiTitle);
+        if (viewOnly) {
+            ((InfoGuiHolder) inv.getHolder()).viewOnly = true;
+        }
 
-        if (!claimed && exportEnabled) {
-            player.sendMessage(getMessage("info-claim-command"));
+        ItemStack border = createGuiItem(Material.BLACK_STAINED_GLASS_PANE, "§8-", null);
+        for (int i = 0; i < 9; i++) inv.setItem(i, border);
+        for (int i = 45; i < 54; i++) inv.setItem(i, border);
+
+        String loreListKey = viewOnly ? "messages.gui-week-item-lore-view" : "messages.gui-week-item-lore";
+
+        int slot = 9;
+        for (int weekNum : detectedWeeks) {
+            if (slot >= 45) break;
+
+            Map<String, Integer> weekData = allWeekData.get(weekNum);
+            boolean isPreviousWeek = (weekNum == previousWeekIndex);
+            boolean hasData = weekData != null && weekData.containsKey(targetName);
+
+            String itemName = getRawMessage("gui-week-item-name").replace("{week}", String.valueOf(weekNum));
+            if (isPreviousWeek) itemName += getRawMessage("gui-previous-week-tag");
+
+            List<String> lore = new ArrayList<>();
+            if (hasData) {
+                int level = weekData.get(targetName);
+                boolean completed = level >= completionThreshold;
+
+                for (String line : getConfig().getStringList(loreListKey)) {
+                    line = line.replace("{level}", String.valueOf(level));
+                    line = line.replace("{completed}", completed ? "§a✔" : "§c✘");
+                    if (line.contains("{claimed_status}")) {
+                        boolean claimed = claimedThisWeek.contains(targetName);
+                        line = line.replace("{claimed_status}", claimed ? getRawMessage("gui-claimed-tag") : getRawMessage("gui-unclaimed-tag"));
+                    }
+                    lore.add(line);
+                }
+            } else {
+                for (String line : getConfig().getStringList("messages.gui-week-item-no-data-lore")) {
+                    lore.add(line);
+                }
+            }
+
+            if (!viewOnly && isPreviousWeek && hasData && !claimedThisWeek.contains(targetName) && exportEnabled) {
+                lore.add("");
+                lore.add(getRawMessage("gui-click-claim"));
+            }
+
+            Material mat = hasData ? Material.PAPER : Material.GRAY_DYE;
+            ItemStack weekItem = createGuiItem(mat, itemName, lore);
+            setWeekTag(weekItem, weekKey, weekNum);
+            inv.setItem(slot, weekItem);
+            slot++;
+        }
+
+        String completionName = getRawMessage("gui-completion-item-name");
+        List<String> completionLore = new ArrayList<>();
+        for (String line : getConfig().getStringList("messages.gui-completion-item-lore")) {
+            completionLore.add(line.replace("{count}", String.valueOf(completionCount)));
+        }
+        inv.setItem(49, createGuiItem(Material.NETHER_STAR, completionName, completionLore));
+
+        viewer.openInventory(inv);
+    }
+
+    private void setWeekTag(ItemStack item, NamespacedKey key, int weekNum) {
+        ItemMeta meta = item.getItemMeta();
+        if (meta != null) {
+            meta.getPersistentDataContainer().set(key, PersistentDataType.INTEGER, weekNum);
+            item.setItemMeta(meta);
         }
     }
 
-    private void showMyCompletion(Player player) {
-        int count = playerCompletionCount.getOrDefault(player.getName(), 0);
-        player.sendMessage(getRawMessage("mycompletion-header"));
-        player.sendMessage(getRawMessage("mycompletion-count").replace("{count}", String.valueOf(count)));
-        player.sendMessage(getRawMessage("mycompletion-threshold").replace("{threshold}", String.valueOf(completionThreshold)));
-        player.sendMessage(getRawMessage("mycompletion-footer"));
+    private ItemStack createGuiItem(Material material, String name, List<String> lore) {
+        ItemStack item = new ItemStack(material);
+        ItemMeta meta = item.getItemMeta();
+        if (meta != null) {
+            meta.setDisplayName(name);
+            if (lore != null) meta.setLore(lore);
+            item.setItemMeta(meta);
+        }
+        return item;
+    }
+
+    @EventHandler
+    public void onInventoryClick(InventoryClickEvent event) {
+        if (!(event.getInventory().getHolder() instanceof InfoGuiHolder)) return;
+        event.setCancelled(true);
+
+        InfoGuiHolder holder = (InfoGuiHolder) event.getInventory().getHolder();
+        if (holder.viewOnly) return;
+        if (!(event.getWhoClicked() instanceof Player)) return;
+
+        Player player = (Player) event.getWhoClicked();
+        ItemStack clicked = event.getCurrentItem();
+        if (clicked == null || !clicked.hasItemMeta()) return;
+
+        NamespacedKey weekKey = new NamespacedKey(this, "week_num");
+        Integer weekNum = clicked.getItemMeta().getPersistentDataContainer().get(weekKey, PersistentDataType.INTEGER);
+        if (weekNum == null || weekNum != previousWeekIndex) return;
+
+        if (!exportEnabled) {
+            player.sendMessage(getMessage("reward-disabled"));
+            return;
+        }
+
+        String playerName = player.getName();
+        if (claimedThisWeek.contains(playerName)) {
+            player.sendMessage(getMessage("already-claimed").replace("{previous_week}", previousWeek));
+            player.closeInventory();
+            return;
+        }
+
+        if (!previousData.containsKey(playerName)) {
+            player.sendMessage(getMessage("no-data").replace("{previous_week}", previousWeek));
+            player.closeInventory();
+            return;
+        }
+
+        player.closeInventory();
+        Bukkit.getScheduler().runTaskLater(this, () -> {
+            if (player.isOnline()) buildAndOpenInfoGui(player, player.getName(), false);
+        }, 2L);
+
+        claimReward(player);
+    }
+
+    private static class InfoGuiHolder implements InventoryHolder {
+        boolean viewOnly;
+
+        @Override
+        public Inventory getInventory() { return null; }
     }
 
     // ============================================================
@@ -611,51 +805,41 @@ public class Main extends JavaPlugin implements Listener {
         SimpleDateFormat sdf = new SimpleDateFormat(timeFormat);
         String date = sdf.format(new Date());
 
-        // 纪念品
-        ItemStack souvenir = createSouvenir(playerName, oldLevel, completions, date);
-        addItemToInventory(player, souvenir);
+        addItemToInventory(player, createSouvenir(playerName, oldLevel, completions, date));
 
-        // 等级奖励（只发放最高档位）
         List<Integer> sortedLevels = new ArrayList<>(levelRewards.keySet());
         sortedLevels.sort(Collections.reverseOrder());
 
         for (int minLevel : sortedLevels) {
             if (oldLevel >= minLevel) {
-                // 物品奖励
                 List<RewardItem> items = levelRewards.get(minLevel);
                 if (items != null) {
-                    for (RewardItem reward : items) {
-                        addItemToInventory(player, reward.toItemStack());
-                    }
+                    for (RewardItem reward : items) addItemToInventory(player, reward.toItemStack());
                 }
-                // 命令奖励
                 List<String> commands = levelCommands.get(minLevel);
                 if (commands != null) {
-                    for (String command : commands) {
-                        String cmd = command.replace("{player}", playerName)
-                                .replace("{level}", String.valueOf(oldLevel))
-                                .replace("{completions}", String.valueOf(completions))
-                                .replace("{previous_week}", previousWeek)
-                                .replace("{current_week}", currentWeek);
-                        Bukkit.dispatchCommand(Bukkit.getConsoleSender(), cmd);
+                    for (String cmd : commands) {
+                        Bukkit.dispatchCommand(Bukkit.getConsoleSender(),
+                                cmd.replace("{player}", playerName)
+                                        .replace("{level}", String.valueOf(oldLevel))
+                                        .replace("{completions}", String.valueOf(completions))
+                                        .replace("{previous_week}", previousWeek)
+                                        .replace("{current_week}", currentWeek));
                     }
                 }
                 break;
             }
         }
 
-        // 通关奖励
         if (completions > 0) {
-            for (RewardItem reward : completionRewards) {
-                addItemToInventory(player, reward.toItemStack());
-            }
-            for (String command : completionCommands) {
-                String cmd = command.replace("{player}", playerName)
-                        .replace("{level}", String.valueOf(oldLevel))
-                        .replace("{completions}", String.valueOf(completions))
-                        .replace("{previous_week}", previousWeek)
-                        .replace("{current_week}", currentWeek);
-                Bukkit.dispatchCommand(Bukkit.getConsoleSender(), cmd);
+            for (RewardItem reward : completionRewards) addItemToInventory(player, reward.toItemStack());
+            for (String cmd : completionCommands) {
+                Bukkit.dispatchCommand(Bukkit.getConsoleSender(),
+                        cmd.replace("{player}", playerName)
+                                .replace("{level}", String.valueOf(oldLevel))
+                                .replace("{completions}", String.valueOf(completions))
+                                .replace("{previous_week}", previousWeek)
+                                .replace("{current_week}", currentWeek));
             }
         }
     }
@@ -664,23 +848,20 @@ public class Main extends JavaPlugin implements Listener {
         ItemStack item = souvenirConfig.toItemStack();
         ItemMeta meta = item.getItemMeta();
 
-        // 替换 Lore 中的变量
         List<String> lore = souvenirConfig.getLore();
         if (lore != null) {
             List<String> newLore = new ArrayList<>();
             for (String line : lore) {
-                line = line.replace("{player}", playerName)
+                newLore.add(line.replace("{player}", playerName)
                         .replace("{level}", String.valueOf(level))
                         .replace("{completions}", String.valueOf(completions))
                         .replace("{date}", date)
                         .replace("{previous_week}", previousWeek)
-                        .replace("{current_week}", currentWeek);
-                newLore.add(line);
+                        .replace("{current_week}", currentWeek));
             }
             meta.setLore(newLore);
         }
 
-        // 替换名称中的变量
         String displayName = souvenirConfig.getName();
         if (displayName != null) {
             displayName = displayName.replace("{player}", playerName)
@@ -712,130 +893,183 @@ public class Main extends JavaPlugin implements Listener {
     // ============================================================
 
     @Override
-    public boolean onCommand(org.bukkit.command.CommandSender sender,
-                             org.bukkit.command.Command command,
-                             String label,
-                             String[] args) {
-
-        if (command.getName().equalsIgnoreCase("islandreward") || command.getName().equalsIgnoreCase("ir")) {
-
-            // 帮助命令
-            if (args.length == 0 || (args.length >= 1 && args[0].equalsIgnoreCase("help"))) {
-                sendHelp(sender);
-                return true;
-            }
-
-            // 玩家命令
-            if (sender instanceof Player) {
-                Player player = (Player) sender;
-
-                switch (args[0].toLowerCase()) {
-                    case "claim":
-                        claimReward(player);
-                        return true;
-                    case "info":
-                        showInfo(player);
-                        return true;
-                    case "mycompletion":
-                        showMyCompletion(player);
-                        return true;
-                }
-            }
-
-            // 管理员权限检查
-            if (!sender.hasPermission("islandreward.admin")) {
-                sender.sendMessage(getMessage("no-permission"));
-                return true;
-            }
-
-            // 管理员命令
-            switch (args[0].toLowerCase()) {
-                case "export":
-                    exportData();
-                    sender.sendMessage(getMessage("export-started"));
-                    return true;
-
-                case "reload":
-                    reloadPlugin(sender);
-                    break;
-
-                case "check":
-                    if (args.length >= 2) {
-                        checkPlayer(sender, args[1]);
-                    } else {
-                        sender.sendMessage(getMessage("usage-check"));
-                    }
-                    break;
-
-                case "add":
-                    if (args.length >= 3) {
-                        try {
-                            addCompletion(sender, args[1], Integer.parseInt(args[2]));
-                        } catch (NumberFormatException e) {
-                            sender.sendMessage(getMessage("not-number"));
-                        }
-                    } else {
-                        sender.sendMessage(getMessage("usage-add"));
-                    }
-                    break;
-
-                case "reimport":
-                    reimportData(sender);
-                    break;
-
-                case "clear":
-                    clearClaimedData(sender, args);
-                    break;
-
-                case "clearcompletion":
-                case "clearc":
-                    clearCompletionData(sender, args);
-                    break;
-
-                default:
-                    sendHelp(sender);
-                    break;
-            }
+    public boolean onCommand(CommandSender sender, org.bukkit.command.Command cmd, String label, String[] args) {
+        if (args.length == 0 || args[0].equalsIgnoreCase("help")) {
+            sendHelp(sender);
             return true;
         }
 
-        return false;
+        switch (args[0].toLowerCase()) {
+            case "claim":
+                return requirePlayer(sender, this::claimReward);
+            case "myinfo":
+                return requirePlayer(sender, this::showInfo);
+            case "info":
+                return requirePlayer(sender, p -> {
+                    if (args.length < 2) { p.sendMessage("§c用法: /ir info <玩家名>"); return; }
+                    buildAndOpenInfoGui(p, args[1], true);
+                });
+            case "completion":
+                return handleCompletion(sender, args);
+            case "record":
+                return handleRecord(sender, args);
+            case "export":
+                if (!checkAdmin(sender)) return true;
+                exportData();
+                sender.sendMessage(getMessage("export-started"));
+                return true;
+            case "reload":
+                if (!checkAdmin(sender)) return true;
+                reloadPlugin(sender);
+                return true;
+            case "reimport":
+                if (!checkAdmin(sender)) return true;
+                reimportData(sender);
+                return true;
+            default:
+                sendHelp(sender);
+                return true;
+        }
+    }
+
+    private boolean checkAdmin(CommandSender sender) {
+        if (!sender.hasPermission("islandreward.admin")) {
+            sender.sendMessage(getMessage("no-permission"));
+            return false;
+        }
+        return true;
+    }
+
+    @FunctionalInterface
+    private interface PlayerCommand { void execute(Player player); }
+
+    private boolean requirePlayer(CommandSender sender, PlayerCommand action) {
+        if (!(sender instanceof Player)) {
+            sender.sendMessage(getMessage("player-only"));
+            return true;
+        }
+        action.execute((Player) sender);
+        return true;
+    }
+
+    private boolean handleCompletion(CommandSender sender, String[] args) {
+        if (!sender.hasPermission("islandreward.admin")) {
+            sender.sendMessage(getMessage("no-permission"));
+            return true;
+        }
+
+        if (args.length < 2) {
+            sendCompletionHelp(sender);
+            return true;
+        }
+
+        switch (args[1].toLowerCase()) {
+            case "add":
+                if (args.length >= 4) {
+                    try {
+                        addCompletion(sender, args[2], Integer.parseInt(args[3]));
+                    } catch (NumberFormatException e) {
+                        sender.sendMessage(getMessage("not-number"));
+                    }
+                } else {
+                    sender.sendMessage(getMessage("completion-add-usage"));
+                }
+                return true;
+
+            case "clear":
+                if (args.length >= 3) {
+                    clearCompletionData(sender, args, 2);
+                } else {
+                    sender.sendMessage(getMessage("completion-clear-usage"));
+                }
+                return true;
+
+            default:
+                sendCompletionHelp(sender);
+                return true;
+        }
+    }
+
+    private boolean handleRecord(CommandSender sender, String[] args) {
+        if (!sender.hasPermission("islandreward.admin")) {
+            sender.sendMessage(getMessage("no-permission"));
+            return true;
+        }
+
+        if (args.length < 2) {
+            sendRecordHelp(sender);
+            return true;
+        }
+
+        switch (args[1].toLowerCase()) {
+            case "clear":
+                if (args.length >= 3) {
+                    clearClaimedData(sender, args, 2);
+                } else {
+                    sender.sendMessage(getMessage("record-clear-usage"));
+                }
+                return true;
+
+            default:
+                sendRecordHelp(sender);
+                return true;
+        }
+    }
+
+    private void sendRecordHelp(CommandSender sender) {
+        sender.sendMessage("");
+        sender.sendMessage("§6§l▎ir record");
+        sender.sendMessage("");
+        sender.sendMessage("§e▸ §7领取记录管理");
+        sender.sendMessage("§8  └ §7/ir record clear <玩家|all> §f- 清除领取记录");
+        sender.sendMessage("");
+    }
+
+    private void sendCompletionHelp(CommandSender sender) {
+        sender.sendMessage("");
+        sender.sendMessage("§6§l▎ir completion");
+        sender.sendMessage("");
+        sender.sendMessage("§e▸ §7通关记录管理");
+        sender.sendMessage("§8  ├ §7/ir completion add <玩家> <次数> §f- 增加通关次数");
+        sender.sendMessage("§8  └ §7/ir completion clear <玩家|all> §f- 清除通关记录");
+        sender.sendMessage("");
     }
 
     private void sendHelp(CommandSender sender) {
         boolean isAdmin = sender.hasPermission("islandreward.admin");
 
-        sender.sendMessage(getRawMessage("help-header"));
-        sender.sendMessage(getRawMessage("help-player-title"));
-        sender.sendMessage(getRawMessage("help-claim").replace("{previous_week}", previousWeek));
-        sender.sendMessage(getRawMessage("help-info").replace("{previous_week}", previousWeek));
-        sender.sendMessage(getRawMessage("help-mycompletion"));
+        sender.sendMessage("");
+        sender.sendMessage(getRawMessage("help-header") + "v" + getDescription().getVersion());
+        sender.sendMessage("");
+
+        sender.sendMessage("§e▸ §7/ir claim §f- 领取 " + previousWeek + " 奖励");
+        sender.sendMessage("§e▸ §7/ir myinfo §f- 打开自己的周目数据总览");
+        sender.sendMessage("§e▸ §7/ir info <玩家> §f- 查看其他玩家的周目数据");
 
         if (isAdmin) {
             sender.sendMessage("");
-            sender.sendMessage(getRawMessage("help-admin-title"));
-            sender.sendMessage(getRawMessage("help-export"));
-            sender.sendMessage(getRawMessage("help-reload"));
-            sender.sendMessage(getRawMessage("help-check"));
-            sender.sendMessage(getRawMessage("help-add"));
-            sender.sendMessage(getRawMessage("help-reimport").replace("{previous_week}", previousWeek));
-            sender.sendMessage(getRawMessage("help-clear"));
-            sender.sendMessage(getRawMessage("help-clearcompletion"));
+            sender.sendMessage("§e▸ §7/ir completion §f- 通关记录管理");
+            sender.sendMessage("§8  ├ §7/ir completion add <玩家> <次数> §f- 增加通关次数");
+            sender.sendMessage("§8  └ §7/ir completion clear <玩家|all> §f- 清除通关记录");
+            sender.sendMessage("");
+            sender.sendMessage("§e▸ §7/ir record §f- 领取记录管理");
+            sender.sendMessage("§8  └ §7/ir record clear <玩家|all> §f- 清除领取记录");
+            sender.sendMessage("");
+            sender.sendMessage("§e▸ §7/ir export §f- 从 BentoBox 导出岛屿等级数据");
+            sender.sendMessage("§e▸ §7/ir reload §f- 重载所有配置");
+            sender.sendMessage("§e▸ §7/ir reimport §f- 重新导入 " + previousWeek + " 数据");
         }
 
         sender.sendMessage("");
-        sender.sendMessage(getRawMessage("help-help"));
-        sender.sendMessage(getRawMessage("help-footer"));
-
-        if (!isAdmin) {
-            sender.sendMessage(getRawMessage("help-permission-note"));
-        }
+        sender.sendMessage("§e▸ §7/ir help §f- 查看帮助");
     }
 
     private void reloadPlugin(CommandSender sender) {
         saveAllData();
         playerCompletionCount.clear();
         previousData.clear();
+        allWeekData.clear();
+        detectedWeeks.clear();
         claimedThisWeek.clear();
 
         loadConfig();
@@ -849,29 +1083,6 @@ public class Main extends JavaPlugin implements Listener {
         sender.sendMessage(getRawMessage("reload-data").replace("{previous_week}", previousWeek).replace("{count}", String.valueOf(previousData.size())));
         sender.sendMessage(getRawMessage("reload-claimed").replace("{count}", String.valueOf(claimedThisWeek.size())));
         sender.sendMessage(getRawMessage("reload-status").replace("{status}", exportEnabled ? getRawMessage("status-enabled") : getRawMessage("status-disabled")));
-    }
-
-    private void checkPlayer(CommandSender sender, String playerName) {
-        int count = playerCompletionCount.getOrDefault(playerName, 0);
-        int oldLevel = previousData.getOrDefault(playerName, -1);
-
-        sender.sendMessage(getRawMessage("check-header").replace("{player}", playerName));
-        sender.sendMessage(getRawMessage("check-completion").replace("{count}", String.valueOf(count)));
-
-        if (oldLevel != -1) {
-            String levelMsg = getRawMessage("check-level")
-                    .replace("{previous_week}", previousWeek)
-                    .replace("{level}", String.valueOf(oldLevel));
-            sender.sendMessage(levelMsg);
-
-            boolean completed = oldLevel >= completionThreshold;
-            String completedMsg = getRawMessage("check-completed").replace("{previous_week}", previousWeek);
-            sender.sendMessage(completedMsg + (completed ? getRawMessage("check-yes") : getRawMessage("check-no")));
-            sender.sendMessage(getRawMessage("check-claimed") + (claimedThisWeek.contains(playerName) ? getRawMessage("check-claimed-yes") : getRawMessage("check-claimed-no")));
-        } else {
-            String noDataMsg = getRawMessage("check-no-data").replace("{previous_week}", previousWeek);
-            sender.sendMessage(noDataMsg);
-        }
     }
 
     private void addCompletion(CommandSender sender, String playerName, int amount) {
@@ -889,13 +1100,13 @@ public class Main extends JavaPlugin implements Listener {
         sender.sendMessage(getMessage("reimport-hint"));
     }
 
-    private void clearClaimedData(CommandSender sender, String[] args) {
-        if (args.length == 1) {
+    private void clearClaimedData(CommandSender sender, String[] args, int targetOffset) {
+        if (args.length <= targetOffset) {
             sender.sendMessage(getMessage("clear-claimed-usage"));
             return;
         }
 
-        if (args[1].equalsIgnoreCase("all")) {
+        if (args[targetOffset].equalsIgnoreCase("all")) {
             int count = claimedThisWeek.size();
             claimedThisWeek.clear();
             saveClaimedData();
@@ -904,7 +1115,7 @@ public class Main extends JavaPlugin implements Listener {
             return;
         }
 
-        String playerName = args[1];
+        String playerName = args[targetOffset];
         if (claimedThisWeek.contains(playerName)) {
             claimedThisWeek.remove(playerName);
             saveClaimedData();
@@ -914,7 +1125,7 @@ public class Main extends JavaPlugin implements Listener {
             Player target = Bukkit.getPlayerExact(playerName);
             if (target != null && target.isOnline()) {
                 target.sendMessage(getRawMessage("clear-claimed-notify-header"));
-                target.sendMessage(getRawMessage("clear-claimed-notify-message"));
+                target.sendMessage(getRawMessage("clear-claimed-notify-message").replace("{previous_week}", previousWeek));
                 if (previousData.containsKey(playerName)) {
                     int oldLevel = previousData.get(playerName);
                     target.sendMessage(getRawMessage("clear-claimed-notify-level").replace("{previous_week}", previousWeek).replace("{level}", String.valueOf(oldLevel)));
@@ -927,13 +1138,13 @@ public class Main extends JavaPlugin implements Listener {
         }
     }
 
-    private void clearCompletionData(CommandSender sender, String[] args) {
-        if (args.length == 1) {
+    private void clearCompletionData(CommandSender sender, String[] args, int targetOffset) {
+        if (args.length <= targetOffset) {
             sender.sendMessage(getMessage("clear-completion-usage"));
             return;
         }
 
-        if (args[1].equalsIgnoreCase("all")) {
+        if (args[targetOffset].equalsIgnoreCase("all")) {
             int count = playerCompletionCount.size();
             playerCompletionCount.clear();
             saveCompletionData();
@@ -941,7 +1152,7 @@ public class Main extends JavaPlugin implements Listener {
             return;
         }
 
-        String playerName = args[1];
+        String playerName = args[targetOffset];
         if (playerCompletionCount.containsKey(playerName)) {
             int oldCount = playerCompletionCount.get(playerName);
             playerCompletionCount.remove(playerName);
@@ -968,6 +1179,10 @@ public class Main extends JavaPlugin implements Listener {
     public int getCompletionCount(String playerName) { return playerCompletionCount.getOrDefault(playerName, 0); }
     public int getCompletionThreshold() { return completionThreshold; }
     public int getPreviousLevel(String playerName) { return previousData.getOrDefault(playerName, -1); }
+    public int getLevelForWeek(String playerName, int weekNum) {
+        Map<String, Integer> weekData = allWeekData.get(weekNum);
+        return weekData != null ? weekData.getOrDefault(playerName, -1) : -1;
+    }
     public boolean isClaimed(String playerName) { return claimedThisWeek.contains(playerName); }
     public String getPreviousWeek() { return previousWeek; }
     public String getCurrentWeek() { return currentWeek; }

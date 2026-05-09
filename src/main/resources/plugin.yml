@@ -1,18 +1,18 @@
 name: IslandReward
-version: 1.0
+version: 2.0
 main: me.malajis.IslandReward.Main
 api-version: 1.13
 author: Malajis
-description: 岛屿周目奖励系统 - 支持多周目等级奖励和BentoBox数据导出
+description: 岛屿周目奖励系统 - 支持多周目数据管理、BentoBox数据导出、PlaceholderAPI变量
 
 commands:
   islandreward:
     description: 岛屿周目奖励系统主命令
-    usage: /<command> [claim|info|mycompletion|export|reload|check|add|reimport]
+    usage: /<command> [claim|myinfo|info|export|reload|reimport|completion|record|help]
     aliases: [ir]
   ir:
     description: 岛屿周目奖励系统快捷命令
-    usage: /ir [claim|info|mycompletion|export|reload|check|add|reimport]
+    usage: /ir [claim|myinfo|info|export|reload|reimport|completion|record|help]
 
 permissions:
   islandreward.admin:
