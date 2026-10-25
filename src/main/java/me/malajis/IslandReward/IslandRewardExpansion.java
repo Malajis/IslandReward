@@ -10,8 +10,10 @@ import org.bukkit.OfflinePlayer;
  * %islandreward_threshold%               - 通关阈值
  * %islandreward_previous_level%          - 当前配置前周目的等级
  * %islandreward_previous_level_N%        - 指定第N周目的等级 (如 previous_level_1)
- * %islandreward_claimed%                 - 是否已领取 (true/false)
- * %islandreward_claimed_status%          - 领取状态文字
+ * %islandreward_claimed%                 - 当前前周目是否已领取 (true/false)
+ * %islandreward_claimed_N%               - 指定第N周目是否已领取 (如 claimed_1)
+ * %islandreward_claimed_status%          - 当前前周目领取状态文字
+ * %islandreward_claimed_status_N%        - 指定第N周目领取状态文字
  * %islandreward_completed%               - 当前配置前周目是否通关 (true/false)
  * %islandreward_completed_N%             - 指定第N周目是否通关 (如 completed_1)
  * %islandreward_completed_status%        - 当前配置前周目通关状态文字
@@ -96,12 +98,20 @@ public class IslandRewardExpansion extends PlaceholderExpansion {
             return String.valueOf(completed);
         }
 
-        if (lower.equals("claimed")) {
-            return String.valueOf(plugin.isClaimed(playerName));
+        if (lower.startsWith("claimed_status")) {
+            int weekNum = parseWeekSuffix(lower, "claimed_status");
+            boolean claimed = weekNum == 0
+                    ? plugin.isClaimed(playerName)
+                    : plugin.isClaimed(playerName, weekNum);
+            return claimed ? plugin.getMessage("status-claimed") : plugin.getMessage("status-unclaimed");
         }
 
-        if (lower.equals("claimed_status")) {
-            return plugin.isClaimed(playerName) ? plugin.getMessage("status-claimed") : plugin.getMessage("status-unclaimed");
+        if (lower.startsWith("claimed")) {
+            int weekNum = parseWeekSuffix(lower, "claimed");
+            boolean claimed = weekNum == 0
+                    ? plugin.isClaimed(playerName)
+                    : plugin.isClaimed(playerName, weekNum);
+            return String.valueOf(claimed);
         }
 
         if (lower.equals("previous_week")) {

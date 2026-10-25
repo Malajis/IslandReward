@@ -18,6 +18,12 @@ public class CommandTabCompleter implements TabCompleter {
     private static final List<String> PLAYER_COMMANDS = Arrays.asList("claim", "myinfo", "info", "help");
     private static final List<String> ADMIN_COMMANDS = Arrays.asList("completion", "record", "export", "reload", "reimport");
 
+    private final Main plugin;
+
+    public CommandTabCompleter(Main plugin) {
+        this.plugin = plugin;
+    }
+
     @Override
     public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
         List<String> completions = new ArrayList<>();
@@ -55,8 +61,10 @@ public class CommandTabCompleter implements TabCompleter {
                 }
             }
             if (sub.equals("record")) {
-                if ("clear".startsWith(args[1].toLowerCase())) {
-                    completions.add("clear");
+                for (String c : Arrays.asList("info", "list", "clear")) {
+                    if (c.startsWith(args[1].toLowerCase())) {
+                        completions.add(c);
+                    }
                 }
             }
             return completions;
@@ -82,6 +90,9 @@ public class CommandTabCompleter implements TabCompleter {
                 completions.addAll(completePlayerNames(args[2]));
                 return completions;
             }
+            if (sub.equals("record") && args[1].equalsIgnoreCase("info")) {
+                return completeWeekNumbers(args[2]);
+            }
             return completions;
         }
 
@@ -94,9 +105,24 @@ public class CommandTabCompleter implements TabCompleter {
                     }
                 }
             }
+            if (sub.equals("record") && args[1].equalsIgnoreCase("clear")) {
+                return completeWeekNumbers(args[3]);
+            }
             return completions;
         }
 
+        return completions;
+    }
+
+    private List<String> completeWeekNumbers(String input) {
+        List<String> completions = new ArrayList<>();
+        if (plugin == null) return completions;
+        for (int week : plugin.getDetectedWeeks()) {
+            String num = String.valueOf(week);
+            if (num.startsWith(input)) {
+                completions.add(num);
+            }
+        }
         return completions;
     }
 

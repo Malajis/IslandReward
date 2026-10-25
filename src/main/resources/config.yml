@@ -9,6 +9,10 @@ current-week: "第二周目"
 previous-week: "第一周目"
 # 当前读取的上个周目数据文件编号 (对应 island_data_{N}.yml)
 previous-week-data: 1
+# 旧版领取记录（claimed_this_week.yml）迁移归属的周目编号
+# 0 = 使用当前 previous-week-data；仅在首次升级、旧文件仍存在时生效一次
+# 如果你在升级插件前已经切换过周目，请把这里改成旧记录实际所属的周目编号
+claimed-legacy-week: 0
 time-format: "yyyy-MM-dd HH:mm:ss"
 
 # ========== 奖励配置 ==========
@@ -103,6 +107,7 @@ messages:
   reward-header: "§a§m                                              §r"
   reward-success: "  §a§l🎁 奖励领取成功！\n\n  §7你在 {previous_week} 的岛屿等级为 §6{level} §7级"
   reward-completed: "\n  §6§l★ 通关成就达成！★"
+  reward-completed-already: "\n  §7你已通关，且 {previous_week} 的通关次数已经发放过，本次不重复累加"
   reward-not-completed: "\n  §7未达到通关要求（需 ≥ §6{threshold} §7级）\n  §7继续加油，下个周目一定通关！"
   reward-footer: "§a§m                                              §r"
   completion-total: "  §7累计通关次数: §6{count} §7次"
@@ -114,6 +119,7 @@ messages:
     - "§7等级: §6{level} §7级"
     - "§7通关判定: {completed}"
     - "§7奖励状态: {claimed_status}"
+    - "§7领取时间: §f{claimed_time}"
   gui-week-item-lore-view:
     - "§7等级: §6{level} §7级"
     - "§7通关判定: {completed}"
@@ -125,6 +131,7 @@ messages:
   gui-previous-week-tag: " §b[上个周目]"
   gui-claimed-tag: "§c已领取"
   gui-unclaimed-tag: "§a可领取"
+  gui-archived-tag: "§8未领取(已归档)"
   gui-click-claim: "§e§l点击此处快捷领取"
 
   # ========== 管理员命令消息（重载消息无前缀，其他有前缀） ==========
@@ -133,6 +140,7 @@ messages:
   reload-completion: "  §7通关次数数据: §6{count} §7条"
   reload-data: "  §7{previous_week}数据: §6{count} §7条"
   reload-claimed: "  §7已领取玩家: §6{count} §7人"
+  reload-claimed-hint: "§7当前可领取周目: §6第{week}周目（{previous_week}）§7，历史领取记录已按周目归档"
   reload-status: "  §7奖励系统: {status}"
   status-enabled: "§a已开启"
   status-disabled: "§c已关闭"
@@ -146,9 +154,9 @@ messages:
   reimport-hint: "§7玩家可使用 §6/ir myinfo §7查看数据，§6/ir claim §7领取奖励"
 
   # ========== record 子命令（领取记录管理） ==========
-  clear-claimed-usage: "§e用法:\n  §6/ir record clear <玩家名> §7清除指定玩家的领取记录\n  §6/ir record clear all §7清除所有玩家的领取记录"
-  clear-claimed-all: "§a已清除所有领取记录，共 §6{count} §a条"
-  clear-claimed-hint: "§7玩家现在可以重新领取 {previous_week} 的奖励"
+  clear-claimed-usage: "§e用法:\n  §6/ir record clear <玩家名> [周目] §7清除指定玩家的领取记录\n  §6/ir record clear all [周目] §7清除所有玩家的领取记录\n  §7不填周目时默认操作当前前周目"
+  clear-claimed-all: "§a已清除第{week}周目所有领取记录，共 §6{count} §a条"
+  clear-claimed-hint: "§7玩家现在可以重新领取 {previous_week} 的奖励（通关次数不会重复累加）"
   clear-claimed-player: "§a已清除玩家 §e{player} §a的领取记录"
   clear-claimed-player-hint: "§7该玩家现在可以重新领取 {previous_week} 的奖励"
   clear-claimed-notify-header: "§e§m                                              §r"
@@ -157,6 +165,15 @@ messages:
   clear-claimed-notify-command: "\n  §7▸ 使用 §6/ir claim §7重新领取奖励"
   clear-claimed-notify-footer: "§e§m                                              §r"
   clear-claimed-not-found: "§c玩家 {player} 没有领取记录或不存在"
+
+  # ========== record info（查看某周目领取记录） ==========
+  record-info-usage: "§c用法: /ir record info [周目编号]"
+  record-info-header: "§6§l▎第{week}周目 领取记录"
+  record-info-total: "  §7已领取: §6{count} §7人"
+  record-info-awarded: "  §7已计入通关次数: §6{count} §7人"
+  record-info-none: "  §7该周目暂无领取记录"
+  record-info-players: "  §7玩家: §f{players}"
+  record-week-not-found: "§c未找到第{week}周目的数据文件，请先确认 island_data_{week}.yml 存在"
 
   # ========== completion 子命令（通关记录管理） ==========
   clear-completion-usage: "§e用法:\n  §6/ir completion clear <玩家名> §7清除指定玩家的通关记录\n  §6/ir completion clear all §7清除所有玩家的通关记录"

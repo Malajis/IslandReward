@@ -36,7 +36,12 @@ public class Main extends JavaPlugin implements Listener {
     // ============================================================
     private Map<String, Integer> playerCompletionCount = new HashMap<>();   // 玩家累计通关次数
     private Map<String, Integer> previousData = new HashMap<>();            // 当前配置的前周目等级数据
-    private Set<String> claimedThisWeek = new HashSet<>();                  // 已领取奖励的玩家
+
+    // 领取记录按周目归档： 周目编号 -> (玩家名 -> 领取记录)
+    private Map<Integer, Map<String, ClaimRecord>> claimsByWeek = new HashMap<>();
+    // 每个周目已经发放过通关次数的玩家（独立于领取记录，防止清记录后重复累加通关次数）
+    private Map<Integer, Set<String>> completionAwardedByWeek = new HashMap<>();
+    private boolean claimsLoaded = false;                                    // 领取记录是否成功加载
 
     // ============================================================
     // 多周目数据
@@ -99,18 +104,19 @@ public class Main extends JavaPlugin implements Listener {
         // 注册命令
         if (getCommand("islandreward") != null) {
             getCommand("islandreward").setExecutor(this);
-            getCommand("islandreward").setTabCompleter(new CommandTabCompleter());
+            getCommand("islandreward").setTabCompleter(new CommandTabCompleter(this));
         }
         if (getCommand("ir") != null) {
             getCommand("ir").setExecutor(this);
-            getCommand("ir").setTabCompleter(new CommandTabCompleter());
+            getCommand("ir").setTabCompleter(new CommandTabCompleter(this));
         }
 
         getLogger().info("=== IslandReward 插件已启用 ===");
         getLogger().info("已加载 " + playerCompletionCount.size() + " 名玩家的通关次数数据");
         getLogger().info("检测到 " + detectedWeeks.size() + " 个周目数据: " + detectedWeeks);
         getLogger().info("当前前周目数据编号: " + previousWeekIndex + "，共 " + previousData.size() + " 条");
-        getLogger().info("已领取玩家: " + claimedThisWeek.size() + " 人");
+        getLogger().info("当前周目已领取玩家: " + getClaimedCount(previousWeekIndex) + " 人");
+        getLogger().info("历史领取记录周目: " + claimsByWeek.keySet());
         getLogger().info("通关阈值: " + completionThreshold + " 级");
         getLogger().info("当前周目: " + currentWeek);
         getLogger().info("前周目: " + previousWeek);
@@ -341,13 +347,169 @@ public class Main extends JavaPlugin implements Listener {
         }
     }
 
-    private void loadClaimedData() {
-        File file = new File(getDataFolder(), "claimed_this_week.yml");
-        if (!file.exists()) return;
+    // ============================================================
+    // 领取记录（按周目归档）
+    // ============================================================
 
+    /**
+     * 读取某一周目的领取记录（不存在时创建空表）
+     */
+    private Map<String, ClaimRecord> claimsOf(int week) {
+        return claimsByWeek.computeIfAbsent(week, k -> new LinkedHashMap<>());
+    }
+
+    /**
+     * 读取某周目“已发放通关次数”的玩家集合（不存在时创建空表）
+     */
+    private Set<String> awardedOf(int week) {
+        return completionAwardedByWeek.computeIfAbsent(week, k -> new LinkedHashSet<>());
+    }
+
+    private void loadClaimedData() {
+        claimsByWeek.clear();
+        completionAwardedByWeek.clear();
+        claimsLoaded = false;
+
+        File claimedFile = new File(getDataFolder(), "claimed_data.yml");
+        if (claimedFile.exists()) {
+            loadClaimedDataFrom(claimedFile);
+            return;
+        }
+
+        // 旧版扁平记录：只在没有新文件时迁移一次
+        File legacyFile = new File(getDataFolder(), "claimed_this_week.yml");
+        if (legacyFile.exists()) {
+            migrateLegacyClaims(legacyFile);
+            return;
+        }
+
+        claimsLoaded = true;
+    }
+
+    private void loadClaimedDataFrom(File file) {
         YamlConfiguration config = YamlConfiguration.loadConfiguration(file);
-        List<String> claimedList = config.getStringList("claimed");
-        claimedThisWeek.addAll(claimedList);
+        ConfigurationSection weeksSection = config.getConfigurationSection("weeks");
+
+        if (weeksSection != null) {
+            for (String key : weeksSection.getKeys(false)) {
+                int week;
+                try {
+                    week = Integer.parseInt(key);
+                } catch (NumberFormatException e) {
+                    getLogger().warning("领取记录中存在无效的周目编号: " + key + "，已跳过");
+                    continue;
+                }
+
+                ConfigurationSection players = weeksSection.getConfigurationSection(key + ".players");
+                if (players != null) {
+                    Map<String, ClaimRecord> records = claimsOf(week);
+                    for (String playerName : players.getKeys(false)) {
+                        records.put(playerName, new ClaimRecord(
+                                players.getString(playerName + ".time", "-"),
+                                players.getInt(playerName + ".level", -1),
+                                players.getInt(playerName + ".completions", 0)));
+                    }
+                }
+
+                for (String playerName : weeksSection.getStringList(key + ".completion-awarded")) {
+                    awardedOf(week).add(playerName);
+                }
+
+                getLogger().info("读取第" + week + "周目领取记录: " + claimsOf(week).size() + " 人");
+            }
+        }
+
+        claimsLoaded = true;
+    }
+
+    /**
+     * 把旧版 claimed_this_week.yml（扁平玩家列表，没有周目信息）迁移成按周目归档的格式。
+     * 归属周目由 config.yml 的 claimed-legacy-week 指定，0 表示使用当前 previous-week-data。
+     */
+    private void migrateLegacyClaims(File legacyFile) {
+        int configuredWeek = getConfig().getInt("claimed-legacy-week", 0);
+        int targetWeek = configuredWeek > 0 ? configuredWeek : previousWeekIndex;
+
+        YamlConfiguration legacyConfig = YamlConfiguration.loadConfiguration(legacyFile);
+        List<String> names = legacyConfig.getStringList("claimed");
+
+        Map<String, Integer> weekLevels = allWeekData.get(targetWeek);
+        Map<String, ClaimRecord> records = claimsOf(targetWeek);
+        Set<String> awarded = awardedOf(targetWeek);
+        int completionCount = 0;
+
+        for (String name : names) {
+            Integer level = weekLevels != null ? weekLevels.get(name) : null;
+            if (level == null) level = previousData.get(name);
+            int levelValue = level != null ? level : -1;
+
+            int completions = levelValue >= completionThreshold ? 1 : 0;
+            records.put(name, new ClaimRecord("-", levelValue, completions));
+            if (completions > 0) {
+                awarded.add(name);
+                completionCount++;
+            }
+        }
+
+        claimsLoaded = true;
+        saveClaimedData();
+
+        File backup = new File(getDataFolder(), "claimed_this_week.yml.bak");
+        if (backup.exists()) {
+            backup = new File(getDataFolder(), "claimed_this_week.yml." + System.currentTimeMillis() + ".bak");
+        }
+
+        if (legacyFile.renameTo(backup)) {
+            getLogger().info("已将旧版领取记录迁移到第" + targetWeek + "周目："
+                    + names.size() + " 人（其中 " + completionCount + " 人已计入通关次数），原文件备份为 " + backup.getName());
+        } else {
+            getLogger().warning("旧版领取记录已导入 claimed_data.yml，但备份 claimed_this_week.yml 失败，请手动处理");
+        }
+
+        if (!names.isEmpty()) {
+            getLogger().warning("请确认上面这些记录确实属于第" + targetWeek + "周目。"
+                    + "如果它们属于更早的周目（例如升级前已经切换过周目），"
+                    + "请把 config.yml 的 claimed-legacy-week 设为正确编号，删除 claimed_data.yml 并还原 "
+                    + backup.getName() + " 后重启。");
+        }
+    }
+
+    private void saveClaimedData() {
+        if (!claimsLoaded) {
+            getLogger().warning("领取记录尚未成功加载，已跳过保存以避免覆盖数据");
+            return;
+        }
+
+        File file = new File(getDataFolder(), "claimed_data.yml");
+        YamlConfiguration config = new YamlConfiguration();
+
+        Set<Integer> weeks = new TreeSet<>();
+        weeks.addAll(claimsByWeek.keySet());
+        weeks.addAll(completionAwardedByWeek.keySet());
+
+        for (int week : weeks) {
+            Map<String, ClaimRecord> records = claimsByWeek.get(week);
+            if (records != null) {
+                for (Map.Entry<String, ClaimRecord> entry : records.entrySet()) {
+                    String path = "weeks." + week + ".players." + entry.getKey();
+                    ClaimRecord record = entry.getValue();
+                    config.set(path + ".time", record.time);
+                    config.set(path + ".level", record.level);
+                    config.set(path + ".completions", record.completions);
+                }
+            }
+
+            Set<String> awarded = completionAwardedByWeek.get(week);
+            if (awarded != null && !awarded.isEmpty()) {
+                config.set("weeks." + week + ".completion-awarded", new ArrayList<>(awarded));
+            }
+        }
+
+        try {
+            config.save(file);
+        } catch (Exception e) {
+            getLogger().severe("保存领取记录失败: " + e.getMessage());
+        }
     }
 
     private void saveAllData() {
@@ -367,18 +529,6 @@ public class Main extends JavaPlugin implements Listener {
             config.save(file);
         } catch (Exception e) {
             getLogger().severe("保存通关次数数据失败: " + e.getMessage());
-        }
-    }
-
-    private void saveClaimedData() {
-        File file = new File(getDataFolder(), "claimed_this_week.yml");
-        YamlConfiguration config = new YamlConfiguration();
-        config.set("claimed", new ArrayList<>(claimedThisWeek));
-
-        try {
-            config.save(file);
-        } catch (Exception e) {
-            getLogger().severe("保存已领取记录失败: " + e.getMessage());
         }
     }
 
@@ -573,7 +723,7 @@ public class Main extends JavaPlugin implements Listener {
         Player player = event.getPlayer();
         String playerName = player.getName();
 
-        if (exportEnabled && !claimedThisWeek.contains(playerName) && previousData.containsKey(playerName)) {
+        if (exportEnabled && !isClaimed(playerName, previousWeekIndex) && previousData.containsKey(playerName)) {
             int oldLevel = previousData.get(playerName);
             Bukkit.getScheduler().runTaskLater(this, () -> {
                 if (player.isOnline()) {
@@ -607,7 +757,7 @@ public class Main extends JavaPlugin implements Listener {
 
         String playerName = player.getName();
 
-        if (claimedThisWeek.contains(playerName)) {
+        if (isClaimed(playerName, previousWeekIndex)) {
             player.sendMessage(getMessage("already-claimed").replace("{previous_week}", previousWeek));
             return;
         }
@@ -618,15 +768,25 @@ public class Main extends JavaPlugin implements Listener {
         }
 
         int oldLevel = previousData.get(playerName);
-        int newCompletions = (oldLevel >= completionThreshold) ? 1 : 0;
+        // 同一玩家同一周目只累计一次通关次数：
+        // 即使管理员清除了领取记录让玩家重新领奖，也不会重复 +1
+        boolean firstCompletion = oldLevel >= completionThreshold
+                && !isCompletionAwarded(playerName, previousWeekIndex);
+        int newCompletions = firstCompletion ? 1 : 0;
 
         giveRewards(player, oldLevel, newCompletions);
 
         int currentCount = playerCompletionCount.getOrDefault(playerName, 0);
-        playerCompletionCount.put(playerName, currentCount + newCompletions);
-        saveCompletionData();
+        int newTotal = currentCount + newCompletions;
+        if (newCompletions > 0) {
+            playerCompletionCount.put(playerName, newTotal);
+            awardedOf(previousWeekIndex).add(playerName);
+            saveCompletionData();
+        }
 
-        claimedThisWeek.add(playerName);
+        // 记录归档到“当前可领取的周目”，换周目后这里的旧记录不会影响新周目的判定
+        String now = new SimpleDateFormat(timeFormat).format(new Date());
+        claimsOf(previousWeekIndex).put(playerName, new ClaimRecord(now, oldLevel, newCompletions));
         saveClaimedData();
 
         player.sendMessage(getRawMessage("reward-header"));
@@ -636,7 +796,11 @@ public class Main extends JavaPlugin implements Listener {
 
         if (newCompletions > 0) {
             player.sendMessage(getRawMessage("reward-completed").replace("{previous_week}", previousWeek));
-            player.sendMessage(getRawMessage("completion-total").replace("{count}", String.valueOf(currentCount + newCompletions)));
+            player.sendMessage(getRawMessage("completion-total").replace("{count}", String.valueOf(newTotal)));
+        } else if (oldLevel >= completionThreshold) {
+            // 已通关但通关次数发过了（例如管理员清除领取记录后重新领取），不重复累加
+            player.sendMessage(getRawMessage("reward-completed-already").replace("{previous_week}", previousWeek));
+            player.sendMessage(getRawMessage("completion-total").replace("{count}", String.valueOf(currentCount)));
         } else {
             player.sendMessage(getRawMessage("reward-not-completed").replace("{threshold}", String.valueOf(completionThreshold)));
         }
@@ -694,8 +858,22 @@ public class Main extends JavaPlugin implements Listener {
                     line = line.replace("{level}", String.valueOf(level));
                     line = line.replace("{completed}", completed ? "§a✔" : "§c✘");
                     if (line.contains("{claimed_status}")) {
-                        boolean claimed = claimedThisWeek.contains(targetName);
-                        line = line.replace("{claimed_status}", claimed ? getRawMessage("gui-claimed-tag") : getRawMessage("gui-unclaimed-tag"));
+                        boolean claimed = isClaimed(targetName, weekNum);
+                        String status;
+                        if (claimed) {
+                            status = getRawMessage("gui-claimed-tag");
+                        } else if (isPreviousWeek) {
+                            status = getRawMessage("gui-unclaimed-tag");
+                        } else {
+                            // 历史周目已经不能再领取，不能显示成“可领取”
+                            status = getRawMessage("gui-archived-tag");
+                        }
+                        line = line.replace("{claimed_status}", status);
+                    }
+                    if (line.contains("{claimed_time}")) {
+                        ClaimRecord record = getClaimRecord(targetName, weekNum);
+                        if (record == null || "-".equals(record.time)) continue;
+                        line = line.replace("{claimed_time}", record.time);
                     }
                     lore.add(line);
                 }
@@ -705,7 +883,7 @@ public class Main extends JavaPlugin implements Listener {
                 }
             }
 
-            if (!viewOnly && isPreviousWeek && hasData && !claimedThisWeek.contains(targetName) && exportEnabled) {
+            if (!viewOnly && isPreviousWeek && hasData && !isClaimed(targetName, weekNum) && exportEnabled) {
                 lore.add("");
                 lore.add(getRawMessage("gui-click-claim"));
             }
@@ -769,7 +947,7 @@ public class Main extends JavaPlugin implements Listener {
         }
 
         String playerName = player.getName();
-        if (claimedThisWeek.contains(playerName)) {
+        if (isClaimed(playerName, previousWeekIndex)) {
             player.sendMessage(getMessage("already-claimed").replace("{previous_week}", previousWeek));
             player.closeInventory();
             return;
@@ -1010,6 +1188,11 @@ public class Main extends JavaPlugin implements Listener {
                 }
                 return true;
 
+            case "info":
+            case "list":
+                showRecordInfo(sender, args);
+                return true;
+
             default:
                 sendRecordHelp(sender);
                 return true;
@@ -1020,8 +1203,52 @@ public class Main extends JavaPlugin implements Listener {
         sender.sendMessage("");
         sender.sendMessage("§6§l▎ir record");
         sender.sendMessage("");
-        sender.sendMessage("§e▸ §7领取记录管理");
-        sender.sendMessage("§8  └ §7/ir record clear <玩家|all> §f- 清除领取记录");
+        sender.sendMessage("§e▸ §7领取记录管理（按周目归档，换周目不会丢失）");
+        sender.sendMessage("§8  ├ §7/ir record info [周目] §f- 查看某周目的领取记录");
+        sender.sendMessage("§8  ├ §7/ir record clear <玩家|all> [周目] §f- 清除领取记录");
+        sender.sendMessage("§8  └ §7不填周目时默认操作当前前周目: §f" + previousWeek + "（第" + previousWeekIndex + "周目）");
+        sender.sendMessage("");
+    }
+
+    /**
+     * 查看某个周目的领取记录（默认当前前周目）
+     */
+    private void showRecordInfo(CommandSender sender, String[] args) {
+        int week = previousWeekIndex;
+        boolean explicitWeek = args.length >= 3;
+        if (explicitWeek) {
+            try {
+                week = Integer.parseInt(args[2]);
+            } catch (NumberFormatException e) {
+                sender.sendMessage(getMessage("record-info-usage"));
+                return;
+            }
+            if (!allWeekData.containsKey(week)) {
+                sender.sendMessage(getMessage("record-week-not-found").replace("{week}", String.valueOf(week)));
+                return;
+            }
+        }
+
+        Map<String, ClaimRecord> records = claimsByWeek.get(week);
+        Set<String> awarded = completionAwardedByWeek.get(week);
+
+        sender.sendMessage("");
+        sender.sendMessage(getRawMessage("record-info-header").replace("{week}", String.valueOf(week)));
+        sender.sendMessage(getRawMessage("record-info-total").replace("{count}", String.valueOf(getClaimedCount(week))));
+        sender.sendMessage(getRawMessage("record-info-awarded").replace("{count}", String.valueOf(awarded != null ? awarded.size() : 0)));
+
+        if (records == null || records.isEmpty()) {
+            sender.sendMessage(getRawMessage("record-info-none"));
+        } else {
+            List<String> names = new ArrayList<>(records.keySet());
+            String joined;
+            if (names.size() > 50) {
+                joined = String.join("§7, §f", names.subList(0, 50)) + " §7...";
+            } else {
+                joined = String.join("§7, §f", names);
+            }
+            sender.sendMessage(getRawMessage("record-info-players").replace("{players}", joined));
+        }
         sender.sendMessage("");
     }
 
@@ -1053,7 +1280,8 @@ public class Main extends JavaPlugin implements Listener {
             sender.sendMessage("§8  └ §7/ir completion clear <玩家|all> §f- 清除通关记录");
             sender.sendMessage("");
             sender.sendMessage("§e▸ §7/ir record §f- 领取记录管理");
-            sender.sendMessage("§8  └ §7/ir record clear <玩家|all> §f- 清除领取记录");
+            sender.sendMessage("§8  ├ §7/ir record info [周目] §f- 查看领取记录");
+            sender.sendMessage("§8  └ §7/ir record clear <玩家|all> [周目] §f- 清除领取记录");
             sender.sendMessage("");
             sender.sendMessage("§e▸ §7/ir export §f- 从 BentoBox 导出岛屿等级数据");
             sender.sendMessage("§e▸ §7/ir reload §f- 重载所有配置");
@@ -1070,7 +1298,9 @@ public class Main extends JavaPlugin implements Listener {
         previousData.clear();
         allWeekData.clear();
         detectedWeeks.clear();
-        claimedThisWeek.clear();
+        claimsByWeek.clear();
+        completionAwardedByWeek.clear();
+        claimsLoaded = false;
 
         loadConfig();
         loadMessages();
@@ -1081,8 +1311,11 @@ public class Main extends JavaPlugin implements Listener {
         sender.sendMessage(getRawMessage("reload-success"));
         sender.sendMessage(getRawMessage("reload-completion").replace("{count}", String.valueOf(playerCompletionCount.size())));
         sender.sendMessage(getRawMessage("reload-data").replace("{previous_week}", previousWeek).replace("{count}", String.valueOf(previousData.size())));
-        sender.sendMessage(getRawMessage("reload-claimed").replace("{count}", String.valueOf(claimedThisWeek.size())));
+        sender.sendMessage(getRawMessage("reload-claimed").replace("{count}", String.valueOf(getClaimedCount(previousWeekIndex))));
         sender.sendMessage(getRawMessage("reload-status").replace("{status}", exportEnabled ? getRawMessage("status-enabled") : getRawMessage("status-disabled")));
+        sender.sendMessage(getRawMessage("reload-claimed-hint")
+                .replace("{week}", String.valueOf(previousWeekIndex))
+                .replace("{previous_week}", previousWeek));
     }
 
     private void addCompletion(CommandSender sender, String playerName, int amount) {
@@ -1106,29 +1339,48 @@ public class Main extends JavaPlugin implements Listener {
             return;
         }
 
+        int week = previousWeekIndex;
+        boolean explicitWeek = args.length > targetOffset + 1;
+        if (explicitWeek) {
+            try {
+                week = Integer.parseInt(args[targetOffset + 1]);
+            } catch (NumberFormatException e) {
+                sender.sendMessage(getMessage("clear-claimed-usage"));
+                return;
+            }
+            if (!allWeekData.containsKey(week)) {
+                sender.sendMessage(getMessage("record-week-not-found").replace("{week}", String.valueOf(week)));
+                return;
+            }
+        }
+        String weekName = weekLabel(week);
+
         if (args[targetOffset].equalsIgnoreCase("all")) {
-            int count = claimedThisWeek.size();
-            claimedThisWeek.clear();
+            int count = getClaimedCount(week);
+            claimsByWeek.remove(week);
             saveClaimedData();
-            sender.sendMessage(getMessage("clear-claimed-all").replace("{count}", String.valueOf(count)));
-            sender.sendMessage(getMessage("clear-claimed-hint").replace("{previous_week}", previousWeek));
+            sender.sendMessage(getMessage("clear-claimed-all")
+                    .replace("{count}", String.valueOf(count))
+                    .replace("{week}", String.valueOf(week)));
+            sender.sendMessage(getMessage("clear-claimed-hint").replace("{previous_week}", weekName));
             return;
         }
 
         String playerName = args[targetOffset];
-        if (claimedThisWeek.contains(playerName)) {
-            claimedThisWeek.remove(playerName);
+        Map<String, ClaimRecord> records = claimsByWeek.get(week);
+        if (records != null && records.containsKey(playerName)) {
+            records.remove(playerName);
             saveClaimedData();
             sender.sendMessage(getMessage("clear-claimed-player").replace("{player}", playerName));
-            sender.sendMessage(getMessage("clear-claimed-player-hint").replace("{previous_week}", previousWeek));
+            sender.sendMessage(getMessage("clear-claimed-player-hint").replace("{previous_week}", weekName));
 
             Player target = Bukkit.getPlayerExact(playerName);
             if (target != null && target.isOnline()) {
                 target.sendMessage(getRawMessage("clear-claimed-notify-header"));
-                target.sendMessage(getRawMessage("clear-claimed-notify-message").replace("{previous_week}", previousWeek));
-                if (previousData.containsKey(playerName)) {
-                    int oldLevel = previousData.get(playerName);
-                    target.sendMessage(getRawMessage("clear-claimed-notify-level").replace("{previous_week}", previousWeek).replace("{level}", String.valueOf(oldLevel)));
+                target.sendMessage(getRawMessage("clear-claimed-notify-message").replace("{previous_week}", weekName));
+                int level = getLevelForWeek(playerName, week);
+                if (level > 0) {
+                    target.sendMessage(getRawMessage("clear-claimed-notify-level").replace("{previous_week}", weekName).replace("{level}", String.valueOf(level)));
                 }
                 target.sendMessage(getRawMessage("clear-claimed-notify-command"));
                 target.sendMessage(getRawMessage("clear-claimed-notify-footer"));
@@ -1136,6 +1388,13 @@ public class Main extends JavaPlugin implements Listener {
         } else {
             sender.sendMessage(getMessage("clear-claimed-not-found").replace("{player}", playerName));
         }
+    }
+
+    /**
+     * 周目显示名：当前前周目用配置里的名称，其他周目用“第N周目”
+     */
+    private String weekLabel(int week) {
+        return week == previousWeekIndex ? previousWeek : "第" + week + "周目";
     }
 
     private void clearCompletionData(CommandSender sender, String[] args, int targetOffset) {
@@ -1183,14 +1442,50 @@ public class Main extends JavaPlugin implements Listener {
         Map<String, Integer> weekData = allWeekData.get(weekNum);
         return weekData != null ? weekData.getOrDefault(playerName, -1) : -1;
     }
-    public boolean isClaimed(String playerName) { return claimedThisWeek.contains(playerName); }
+    public boolean isClaimed(String playerName) { return isClaimed(playerName, previousWeekIndex); }
+    public boolean isClaimed(String playerName, int weekNum) {
+        Map<String, ClaimRecord> records = claimsByWeek.get(weekNum);
+        return records != null && records.containsKey(playerName);
+    }
+    public ClaimRecord getClaimRecord(String playerName, int weekNum) {
+        Map<String, ClaimRecord> records = claimsByWeek.get(weekNum);
+        return records != null ? records.get(playerName) : null;
+    }
+    public int getClaimedCount(int weekNum) {
+        Map<String, ClaimRecord> records = claimsByWeek.get(weekNum);
+        return records != null ? records.size() : 0;
+    }
+    public boolean isCompletionAwarded(String playerName, int weekNum) {
+        Set<String> awarded = completionAwardedByWeek.get(weekNum);
+        return awarded != null && awarded.contains(playerName);
+    }
     public String getPreviousWeek() { return previousWeek; }
     public String getCurrentWeek() { return currentWeek; }
     public boolean isExportEnabled() { return exportEnabled; }
+    public List<Integer> getDetectedWeeks() { return new ArrayList<>(detectedWeeks); }
 
     // ============================================================
     // 内部类
     // ============================================================
+
+    /**
+     * 单个玩家的领取记录（归属于某一个周目）
+     */
+    public static class ClaimRecord {
+        private final String time;       // 领取时间
+        private final int level;         // 领取时的周目等级
+        private final int completions;   // 本次加的通关次数（0 或 1）
+
+        public ClaimRecord(String time, int level, int completions) {
+            this.time = time;
+            this.level = level;
+            this.completions = completions;
+        }
+
+        public String getTime() { return time; }
+        public int getLevel() { return level; }
+        public int getCompletions() { return completions; }
+    }
 
     /**
      * 奖励物品配置类

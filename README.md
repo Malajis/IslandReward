@@ -14,12 +14,13 @@ IslandReward 是一款 Minecraft 服务器插件，为基于 BentoBox 的岛屿�
 - **BentoBox 数据导出**：自动从 BentoBox 数据库导出岛屿等级数据
 - **PlaceholderAPI 支持**：提供指定周目的变量，支持 `_N` 后缀
 - **数据持久化**：自动保存通关次数和领取记录
+- **领取记录按周目归档**：换周目后旧记录保留为历史，不会卡住新周目的领取
 - **全消息可配置**：支持自定义所有提示消息
 - **配置自动补全**：升级插件时自动补全缺失的配置项
 
 ## 📦 安装方法
 
-1. 将 `IslandReward-2.0.jar` 放入服务器的 `plugins/` 目录
+1. 将 `IslandReward-2.1.jar` 放入服务器的 `plugins/` 目录
 2. 确保服务器已安装 **PlaceholderAPI**（可选，用于变量）
 3. 确保服务器已安装 **BentoBox**（用于数据导出）
 4. 重启服务器或使用 `plugman load IslandReward` 加载插件
@@ -42,7 +43,8 @@ IslandReward 是一款 Minecraft 服务器插件，为基于 BentoBox 的岛屿�
 |------|------|------|
 | `/ir completion add <玩家> <次数>` | 增加玩家的通关次数 | `islandreward.admin` |
 | `/ir completion clear <玩家\|all>` | 清除通关记录 | `islandreward.admin` |
-| `/ir record clear <玩家\|all>` | 清除奖励领取记录 | `islandreward.admin` |
+| `/ir record info [周目]` | 查看某周目的领取记录（玩家、时间、通关次数发放） | `islandreward.admin` |
+| `/ir record clear <玩家\|all> [周目]` | 清除指定周目（默认当前前周目）的奖励领取记录 | `islandreward.admin` |
 | `/ir export` | 从 BentoBox 导出岛屿等级数据 | `islandreward.admin` |
 | `/ir reload` | 重载配置与数据文件 | `islandreward.admin` |
 | `/ir reimport` | 重新从文件加载周目数据 | `islandreward.admin` |
@@ -60,8 +62,10 @@ IslandReward 是一款 Minecraft 服务器插件，为基于 BentoBox 的岛屿�
 | `%islandreward_threshold%` | 通关阈值 | 10000 |
 | `%islandreward_previous_level%` | 当前配置前周目的等级 | 15000 |
 | `%islandreward_previous_level_N%` | 指定第 N 周目的等级 | 如 `previous_level_1` |
-| `%islandreward_claimed%` | 是否已领取 | true |
-| `%islandreward_claimed_status%` | 领取状态 | §a已领取 |
+| `%islandreward_claimed%` | 当前前周目是否已领取 | true |
+| `%islandreward_claimed_N%` | 指定第 N 周目是否已领取 | 如 `claimed_1` |
+| `%islandreward_claimed_status%` | 当前前周目领取状态 | §a已领取 |
+| `%islandreward_claimed_status_N%` | 指定第 N 周目领取状态 | 如 `claimed_status_1` |
 | `%islandreward_completed%` | 当前配置前周目是否通关 | true |
 | `%islandreward_completed_N%` | 指定第 N 周目是否通关 | 如 `completed_1` |
 | `%islandreward_completed_status%` | 当前配置前周目通关状态 | §a已通关 |
@@ -79,6 +83,8 @@ IslandReward 是一款 Minecraft 服务器插件，为基于 BentoBox 的岛屿�
 %islandreward_previous_level_2%   → 第 2 周目的等级
 %islandreward_completed_1%        → 第 1 周目是否通关
 %islandreward_completed_status_1% → 第 1 周目通关状态文字
+%islandreward_claimed_1%          → 第 1 周目奖励是否已领取
+%islandreward_claimed_status_1%   → 第 1 周目领取状态文字
 ```
 
 不加后缀时默认查询当前配置的前周目，向后兼容旧版。
@@ -109,6 +115,7 @@ completion-threshold: 10000    # 通关所需等级阈值
 current-week: "第二周目"        # 当前周目名称
 previous-week: "第一周目"       # 前周目名称
 previous-week-data: 1          # 当前读取的上个周目文件编号 (对应 island_data_N.yml)
+claimed-legacy-week: 0         # 旧版领取记录迁移归属周目，0 = 使用 previous-week-data
 time-format: "yyyy-MM-dd HH:mm:ss"
 ```
 
@@ -161,7 +168,29 @@ rewards:
 | `island_data_2.yml` | 第 2 周目等级数据 |
 | `island_data_N.yml` | 以此类推 |
 | `completion_data.yml` | 玩家累计通关次数 |
-| `claimed_this_week.yml` | 已领取奖励的玩家列表 |
+| `claimed_data.yml` | 按周目归档的奖励领取记录 |
+| `claimed_this_week.yml.bak` | 旧版领取记录的迁移备份（升级后自动生成，可保留） |
+
+### 领取记录格式
+
+`claimed_data.yml` 以“周目编号 → 玩家”的结构保存，每个周目的记录相互独立：
+
+```yaml
+weeks:
+  '1':
+    players:
+      Alice:
+        time: '2026-10-20 20:15:33'
+        level: 12000
+        completions: 1
+    completion-awarded:
+    - Alice
+```
+
+- `players`：该周目已领取的玩家，`time` / `level` / `completions` 仅用于查询和审计
+- `completion-awarded`：该周目已经加过通关次数的玩家，保证“清记录后重新领取”不会重复累计
+
+升级到本版本后，插件会自动把旧的 `claimed_this_week.yml` 迁移到 `claimed-legacy-week` 指定的周目（默认当前 `previous-week-data`），并把原文件重命名备份，不会删除数据。
 
 ## 📝 使用流程
 
@@ -177,6 +206,24 @@ rewards:
 4. 将导出的文件重命名为 `island_data_N.yml`（N 为周目编号）
 5. 执行 `/ir reload` 重载配置
 6. 玩家进入服务器时会收到领取提醒，使用 `/ir claim` 领取奖励
+
+### 换周目后旧领取记录怎么处理
+
+**不需要清空，也不应该清空。** 领取记录按周目归档，切换 `previous-week-data` 后：
+
+- 新周目的领取记录是空的，所有玩家都能正常领取新周目奖励
+- 旧周目的记录原样保留，只是变为历史数据（不能再领取）
+- GUI 里每个周目显示各自的领取状态和领取时间，PAPI 也可用 `%islandreward_claimed_N%` 查询
+- 旧周目没来得及领的玩家会显示“未领取(已归档)”，不会误显示成“可领取”
+
+换周目前后建议用管理员命令确认：
+
+```
+/ir record info 1          # 查看第 1 周目已领取人数和玩家列表
+/ir record clear Alice 1   # 需要时单独清除某个玩家在某个周目的记录
+```
+
+只有以下情况才需要清记录：玩家领奖时背包/发奖出错需要补发，或测试数据要清理。清记录后玩家可重新领取，但同一周目的通关次数不会重复累加。
 
 ### 多周目数据管理
 
@@ -216,7 +263,10 @@ A: 使用 `/ir info <玩家名>` 查看其他玩家的周目数据（只读，�
 A: 通关次数是累计统计，用于记录玩家完成周目的次数，可在计分板中展示作为荣誉。
 
 **Q: 如何重置玩家的领取资格？**  
-A: 使用 `/ir record clear <玩家名>` 清除指定玩家的领取记录，或 `/ir record clear all` 清除所有记录。
+A: 使用 `/ir record clear <玩家名> [周目]` 清除指定玩家在指定周目的领取记录，或 `/ir record clear all [周目]` 清除该周目所有记录。不填周目时只影响当前前周目；旧周目的历史记录不会被动到，通关次数也不会因重新领取而重复累加。
+
+**Q: 换周目后要不要删 `claimed_this_week.yml`？**  
+A: 新版本不需要。旧的领取记录会在升级时自动迁移并备份成 `claimed_this_week.yml.bak`，之后统一保存在 `claimed_data.yml` 里按周目归档；换周目只改 `previous-week-data` 即可。
 
 **Q: 如何修改奖励内容？**  
 A: 编辑 `config.yml` 中的 `rewards` 部分，然后执行 `/ir reload` 重载配置。
